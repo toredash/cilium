@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"sync"
 	"time"
@@ -166,6 +167,14 @@ func (ipc *IPCache) InjectLabels(ctx context.Context, modifiedPrefixes []netip.P
 		return modifiedPrefixes, errors.New("k8s cache not fully synced")
 	}
 
+	type ipcacheEntry struct {
+		identity   Identity
+		tunnelPeer net.IP
+		encryptKey uint8
+
+		force bool
+	}
+
 	var (
 		// previouslyAllocatedIdentities maps IP Prefix -> Identity for
 		// old identities where the prefix will now map to a new identity
@@ -175,9 +184,8 @@ func (ipc *IPCache) InjectLabels(ctx context.Context, modifiedPrefixes []netip.P
 		idsToAdd    = make(map[identity.NumericIdentity]labels.LabelArray)
 		idsToDelete = make(map[identity.NumericIdentity]labels.LabelArray)
 		// entriesToReplace stores the identity to replace in the ipcache.
-		entriesToReplace   = make(map[netip.Prefix]Identity)
-		entriesToDelete    = make(map[netip.Prefix]Identity)
-		forceIPCacheUpdate = make(map[netip.Prefix]bool) // prefix => force
+		entriesToReplace = make(map[netip.Prefix]ipcacheEntry)
+		entriesToDelete  = make(map[netip.Prefix]Identity)
 	)
 
 	ipc.metadata.RLock()
@@ -226,19 +234,21 @@ func (ipc *IPCache) InjectLabels(ctx context.Context, modifiedPrefixes []netip.P
 			}
 
 			idsToAdd[newID.ID] = newID.Labels.LabelArray()
-			entriesToReplace[prefix] = Identity{
-				ID:                  newID.ID,
-				Source:              prefixInfo.Source(),
-				createdFromMetadata: true,
-			}
-			// IPCache.Upsert() and friends currently require a
-			// Source to be provided during upsert. If the old
-			// Source was higher precedence due to labels that
-			// have now been removed, then we need to explicitly
-			// work around that to remove the old higher-priority
-			// identity and replace it with this new identity.
-			if entryExists && prefixInfo.Source() != oldID.Source && oldID.ID != newID.ID {
-				forceIPCacheUpdate[prefix] = true
+			entriesToReplace[prefix] = ipcacheEntry{
+				identity: Identity{
+					ID:                  newID.ID,
+					Source:              prefixInfo.Source(),
+					createdFromMetadata: true,
+				},
+				tunnelPeer: prefixInfo.TunnelPeer().IP(),
+				encryptKey: prefixInfo.EncryptKey().Uint8(),
+				// IPCache.Upsert() and friends currently require a
+				// Source to be provided during upsert. If the old
+				// Source was higher precedence due to labels that
+				// have now been removed, then we need to explicitly
+				// work around that to remove the old higher-priority
+				// identity and replace it with this new identity.
+				force: entryExists && prefixInfo.Source() != oldID.Source && oldID.ID != newID.ID,
 			}
 		}
 	releaseIdentity:
@@ -271,35 +281,21 @@ func (ipc *IPCache) InjectLabels(ctx context.Context, modifiedPrefixes []netip.P
 
 	ipc.mutex.Lock()
 	defer ipc.mutex.Unlock()
-	for p, id := range entriesToReplace {
+	for p, entry := range entriesToReplace {
 		prefix := p.String()
-		hIP, key := ipc.getHostIPCache(prefix)
 		meta := ipc.getK8sMetadata(prefix)
 		if _, err2 := ipc.upsertLocked(
 			prefix,
-			hIP,
-			key,
+			entry.tunnelPeer,
+			entry.encryptKey,
 			meta,
-			id,
-			forceIPCacheUpdate[p],
+			entry.identity,
+			entry.force,
 		); err2 != nil {
-			// It's plausible to pull the same information twice
-			// from different sources, for instance in etcd mode
-			// where node information is propagated both via the
-			// kvstore and via the k8s control plane. If the
-			// upsert was rejected due to source precedence, but the
-			// identity is unchanged, then we can safely ignore the
-			// error message.
-			oldID, ok := previouslyAllocatedIdentities[p]
-			if !(ok && oldID.ID == id.ID && errors.Is(err2, &ErrOverwrite{
-				ExistingSrc: oldID.Source,
-				NewSrc:      id.Source,
-			})) {
-				log.WithError(err2).WithFields(logrus.Fields{
-					logfields.IPAddr:   prefix,
-					logfields.Identity: id,
-				}).Error("Failed to replace ipcache entry with new identity after label removal. Traffic may be disrupted.")
-			}
+			log.WithError(err2).WithFields(logrus.Fields{
+				logfields.IPAddr:   prefix,
+				logfields.Identity: entry.identity.ID,
+			}).Error("Failed to replace ipcache entry with new identity after label removal. Traffic may be disrupted.")
 		}
 	}
 
