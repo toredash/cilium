@@ -17,6 +17,7 @@ data:
     {{- else }}
     peer-service: unix://{{ .Values.hubble.socketPath }}
     {{- end }}
+    static-peers: {{ .Values.hubble.relay.staticPeers }}
     listen-address: {{ .Values.hubble.relay.listenHost }}:{{ .Values.hubble.relay.listenPort }}
     {{- if .Values.hubble.relay.pprof.enabled }}
     pprof: {{ .Values.hubble.relay.pprof.enabled | quote }}
