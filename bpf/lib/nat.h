@@ -1556,6 +1556,28 @@ static __always_inline void snat_v6_init_tuple(const struct ipv6hdr *ip6,
 	tuple->flags = dir;
 }
 
+static __always_inline bool
+__revalidate_data_with_asm(struct __ctx_buff *ctx, void **data_,
+			   void **data_end_, void **l3, const __u32 l3_len)
+{
+        const __u64 tot_len = ETH_HLEN + l3_len;
+	void *data_end;
+	void *data;
+
+	/* Verifier workaround, do this unconditionally: invalid size of register spill. */
+	data_end = __ctx_ptr_data_end(ctx);
+	data = __ctx_ptr_data(ctx);
+	if (data + tot_len > data_end)
+		return false;
+
+	/* Verifier workaround: pointer arithmetic on pkt_end prohibited. */
+	*data_ = data;
+	*data_end_ = data_end;
+
+	*l3 = data + ETH_HLEN;
+	return true;
+}
+
 static __always_inline bool snat_v6_needed(struct __ctx_buff *ctx,
 					   union v6addr *addr)
 {
@@ -1566,7 +1588,8 @@ static __always_inline bool snat_v6_needed(struct __ctx_buff *ctx,
 	void *data, *data_end;
 	struct ipv6hdr *ip6;
 
-	if (!revalidate_data(ctx, &data, &data_end, &ip6))
+	if (!__revalidate_data_with_asm(ctx, &data, &data_end,
+					(void **)&ip6, sizeof(*ip6)))
 		return false;
 
 	/* See comment in snat_v4_prepare_state(). */
