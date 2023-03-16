@@ -35,7 +35,7 @@ func (c cidrSet) StringSlice() []string {
 	return cidrs
 }
 
-// availableAddrBits returns the log2(availableIPs) of this CIDR set
+// availableAddrs returns the number of available addresses in this set
 func (c cidrSet) availableAddrs() *big.Int {
 	total := big.NewInt(0)
 	for p := range c {
@@ -213,9 +213,8 @@ func (p *PoolAllocator) ReleaseNode(nodeName string) error {
 	return err
 }
 
-func (p *PoolAllocator) PopulateNodeSpec(cn *v2.CiliumNode) {
-	var pools []types.IPAMPoolAllocation
-	for poolName, cidrs := range p.nodes[cn.Name] {
+func (p *PoolAllocator) AllocatedPools(targetNode string) (pools []types.IPAMPoolAllocation) {
+	for poolName, cidrs := range p.nodes[targetNode] {
 		v4CIDRs := cidrs.v4.StringSlice()
 		v6CIDRs := cidrs.v6.StringSlice()
 
@@ -229,7 +228,7 @@ func (p *PoolAllocator) PopulateNodeSpec(cn *v2.CiliumNode) {
 		return pools[i].Pool < pools[j].Pool
 	})
 
-	cn.Spec.IPAM.Pools.Allocated = pools
+	return pools
 }
 
 func (p *PoolAllocator) isAllocated(targetNode, sourcePool string, cidr netip.Prefix) bool {

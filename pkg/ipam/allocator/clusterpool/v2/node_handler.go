@@ -113,7 +113,7 @@ func (n *NodeHandler) upsertLocked(resource *v2.CiliumNode) bool {
 			newResource.Status.IPAM.OperatorStatus.Error = errorMessage
 
 			n.mutex.Lock()
-			n.poolManager.PopulateNodeSpec(newResource)
+			newResource.Spec.IPAM.Pools.Allocated = n.poolManager.AllocatedPools(newResource.Name)
 			n.mutex.Unlock()
 
 			var controllerErr error

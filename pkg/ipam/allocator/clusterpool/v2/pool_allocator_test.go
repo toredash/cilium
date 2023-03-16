@@ -4,340 +4,185 @@
 package v2
 
 import (
-	"fmt"
 	"math/big"
 	"net/netip"
-	"strings"
 	"testing"
 
-	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/cilium/cilium/pkg/ipam/allocator/clusterpool/cidralloc"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 )
 
-func newAllocators(maskSize int, cidrs ...string) []cidralloc.CIDRAllocator {
-	isIPv6 := false
-	for _, c := range cidrs {
-		isIPv6 = isIPv6 || strings.Contains(c, ":")
-	}
-	cidrsets, err := cidralloc.NewCIDRSets(isIPv6, cidrs, maskSize)
-	if err != nil {
-		panic(err)
-	}
-	return cidrsets
-}
+func TestPoolAllocator(t *testing.T) {
+	p := NewPoolAllocator()
+	err := p.AddPool("default",
+		[]string{"10.100.0.0/16", "10.200.0.0/16"}, 24,
+		[]string{"fd00:100::/80", "fc00:100::/80"}, 96,
+	)
+	assert.NoError(t, err)
 
-func newAllocatorsWithOccupied(maskSize int, cidrs []string, occupied []string) []cidralloc.CIDRAllocator {
-	cidrsets := newAllocators(maskSize, cidrs...)
-	for _, c := range occupied {
-		err := occupyCIDR(cidrsets, netip.MustParsePrefix(c))
-		if err != nil {
-			panic(err)
-		}
+	// node1 is a node which has some previously allocated CIDRs
+	node1 := &v2.CiliumNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node1",
+		},
+		Spec: v2.NodeSpec{
+			IPAM: ipamTypes.IPAMSpec{
+				Pools: ipamTypes.IPAMPoolSpec{
+					Requested: []ipamTypes.IPAMPoolRequest{
+						{
+							Pool: "default",
+							Needed: ipamTypes.IPAMPoolDemand{
+								IPv4Addrs: 10,
+								IPv6Addrs: 10,
+							},
+						},
+					},
+					Allocated: []ipamTypes.IPAMPoolAllocation{
+						{
+							Pool: "default",
+							CIDRs: []string{
+								"fd00:100:0:0:0:10::/96",
+								"10.100.20.0/24",
+								"10.100.10.0/24",
+							},
+						},
+					},
+				},
+			},
+		},
 	}
-	return cidrsets
-}
+	// node2 is a new node which needs a fresh allocation
+	node2 := &v2.CiliumNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node2",
+		},
+		Spec: v2.NodeSpec{
+			IPAM: ipamTypes.IPAMSpec{
+				Pools: ipamTypes.IPAMPoolSpec{
+					Requested: []ipamTypes.IPAMPoolRequest{
+						{
+							Pool: "default",
+							Needed: ipamTypes.IPAMPoolDemand{
+								IPv4Addrs: 10,
+								IPv6Addrs: 10,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	// node3 is a new node which is attempting to steal a CIDR from node1
+	node3 := &v2.CiliumNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node3",
+		},
+		Spec: v2.NodeSpec{
+			IPAM: ipamTypes.IPAMSpec{
+				Pools: ipamTypes.IPAMPoolSpec{
+					Allocated: []ipamTypes.IPAMPoolAllocation{
+						{
+							Pool: "default",
+							CIDRs: []string{
+								"10.100.10.0/24", // already allocated to node1
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	// node1 has some pre-allocated pools that need to be restored
+	err = p.AllocateToNode(node1)
+	assert.Error(t, errAllocatorNotReady{}, err)
+	assert.Equal(t, []ipamTypes.IPAMPoolAllocation{
+		{
+			Pool: "default",
+			CIDRs: []string{ // must be sorted
+				"10.100.10.0/24",
+				"10.100.20.0/24",
+				"fd00:100::10:0:0/96",
+			},
+		},
+	}, p.AllocatedPools(node1.Name))
 
-func TestPoolAllocator_AllocateToNode(t *testing.T) {
-	type fields struct {
-		pools map[string]cidrPool
-		nodes map[string]poolToCIDRs
-		ready bool
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    *v2.CiliumNode
-		want    *v2.CiliumNode
-		wantErr string
-	}{
+	// node2 must not allocate before restoration has finished
+	err = p.AllocateToNode(node2)
+	assert.Error(t, errAllocatorNotReady{}, err)
+	assert.Empty(t, p.AllocatedPools(node2.Name))
+
+	// node3 must not steal the restored CIDR from node1
+	err = p.AllocateToNode(node3)
+	assert.Error(t, errAllocatorNotReady{}, err)
+	assert.Empty(t, p.AllocatedPools(node3.Name))
+
+	// Mark as ready
+	p.RestoreFinished()
+
+	// The following is a no-op, but should not return any errors
+	err = p.AllocateToNode(node1)
+	assert.NoError(t, err)
+	node1.Spec.IPAM.Pools.Allocated = p.AllocatedPools(node1.Name)
+	assert.Equal(t, []ipamTypes.IPAMPoolAllocation{
 		{
-			name: "empty pool",
-			fields: fields{
-				pools: map[string]cidrPool{
-					"default": {
-						v4: nil,
-						v6: nil,
-					},
-				},
-				ready: true,
-			},
-			args: &v2.CiliumNode{
-				Spec: v2.NodeSpec{
-					IPAM: ipamTypes.IPAMSpec{
-						Pools: ipamTypes.IPAMPoolSpec{
-							Requested: []ipamTypes.IPAMPoolRequest{
-								{
-									Pool: "default",
-									Needed: ipamTypes.IPAMPoolDemand{
-										IPv4Addrs: 10,
-										IPv6Addrs: 10,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			wantErr: errPoolEmpty.Error(),
-		},
-		{
-			name: "empty ipv6 pool, but ipv4 works",
-			fields: fields{
-				pools: map[string]cidrPool{
-					"default": {
-						v4: newAllocators(24, "192.168.0.0/16"),
-						v6: nil,
-					},
-				},
-				nodes: map[string]poolToCIDRs{},
-				ready: true,
-			},
-			args: &v2.CiliumNode{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "node1",
-				},
-				Spec: v2.NodeSpec{
-					IPAM: ipamTypes.IPAMSpec{
-						Pools: ipamTypes.IPAMPoolSpec{
-							Requested: []ipamTypes.IPAMPoolRequest{
-								{
-									Pool: "default",
-									Needed: ipamTypes.IPAMPoolDemand{
-										IPv4Addrs: 10,
-										IPv6Addrs: 10,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			want: &v2.CiliumNode{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "node1",
-				},
-				Spec: v2.NodeSpec{
-					IPAM: ipamTypes.IPAMSpec{
-						Pools: ipamTypes.IPAMPoolSpec{
-							Allocated: []ipamTypes.IPAMPoolAllocation{
-								{
-									Pool:  "default",
-									CIDRs: []string{"192.168.0.0/24"},
-								},
-							},
-							Requested: []ipamTypes.IPAMPoolRequest{
-								{
-									Pool: "default",
-									Needed: ipamTypes.IPAMPoolDemand{
-										IPv4Addrs: 10,
-										IPv6Addrs: 10,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			wantErr: fmt.Errorf(`failed to allocate ipv6 address for node "node1" from pool "default": %w`, errPoolEmpty).Error(),
-		},
-		{
-			name: "basic default pool",
-			fields: fields{
-				pools: map[string]cidrPool{
-					"default": {
-						v4: newAllocators(24, "192.168.0.0/16"),
-						v6: newAllocators(96, "f00d::/80"),
-					},
-				},
-				nodes: map[string]poolToCIDRs{},
-				ready: true,
-			},
-			args: &v2.CiliumNode{
-				Spec: v2.NodeSpec{
-					IPAM: ipamTypes.IPAMSpec{
-						Pools: ipamTypes.IPAMPoolSpec{
-							Requested: []ipamTypes.IPAMPoolRequest{
-								{
-									Pool: "default",
-									Needed: ipamTypes.IPAMPoolDemand{
-										IPv4Addrs: 10,
-										IPv6Addrs: 10,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			want: &v2.CiliumNode{
-				Spec: v2.NodeSpec{
-					IPAM: ipamTypes.IPAMSpec{
-						Pools: ipamTypes.IPAMPoolSpec{
-							Allocated: []ipamTypes.IPAMPoolAllocation{
-								{
-									Pool:  "default",
-									CIDRs: []string{"192.168.0.0/24", "f00d::/96"},
-								},
-							},
-							Requested: []ipamTypes.IPAMPoolRequest{
-								{
-									Pool: "default",
-									Needed: ipamTypes.IPAMPoolDemand{
-										IPv4Addrs: 10,
-										IPv6Addrs: 10,
-									},
-								},
-							},
-						},
-					},
-				},
+			Pool: "default",
+			CIDRs: []string{ // must be sorted
+				"10.100.10.0/24",
+				"10.100.20.0/24",
+				"fd00:100::10:0:0/96",
 			},
 		},
+	}, node1.Spec.IPAM.Pools.Allocated)
+
+	// The following should allocate one IPv4 and IPv6 CIDR each to node2
+	err = p.AllocateToNode(node2)
+	assert.NoError(t, err)
+	node2.Spec.IPAM.Pools.Allocated = p.AllocatedPools(node2.Name)
+	assert.Equal(t, []ipamTypes.IPAMPoolAllocation{
 		{
-			name: "occupy ipv4, allocate ipv6",
-			fields: fields{
-				pools: map[string]cidrPool{
-					"default": {
-						v4: newAllocators(24, "192.168.0.0/16"),
-						v6: newAllocators(96, "f00d::/80"),
-					},
-				},
-				nodes: map[string]poolToCIDRs{},
-				ready: true,
-			},
-			args: &v2.CiliumNode{
-				Spec: v2.NodeSpec{
-					IPAM: ipamTypes.IPAMSpec{
-						Pools: ipamTypes.IPAMPoolSpec{
-							Allocated: []ipamTypes.IPAMPoolAllocation{
-								{
-									Pool:  "default",
-									CIDRs: []string{"192.168.0.0/24"},
-								},
-							},
-							Requested: []ipamTypes.IPAMPoolRequest{
-								{
-									Pool: "default",
-									Needed: ipamTypes.IPAMPoolDemand{
-										IPv4Addrs: 10,
-										IPv6Addrs: 10,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			want: &v2.CiliumNode{
-				Spec: v2.NodeSpec{
-					IPAM: ipamTypes.IPAMSpec{
-						Pools: ipamTypes.IPAMPoolSpec{
-							Allocated: []ipamTypes.IPAMPoolAllocation{
-								{
-									Pool:  "default",
-									CIDRs: []string{"192.168.0.0/24", "f00d::/96"},
-								},
-							},
-							Requested: []ipamTypes.IPAMPoolRequest{
-								{
-									Pool: "default",
-									Needed: ipamTypes.IPAMPoolDemand{
-										IPv4Addrs: 10,
-										IPv6Addrs: 10,
-									},
-								},
-							},
-						},
-					},
-				},
+			Pool: "default",
+			CIDRs: []string{
+				"10.100.0.0/24",
+				"fd00:100::/96",
 			},
 		},
+	}, node2.Spec.IPAM.Pools.Allocated)
+
+	// The following should be rejected, because the CIDR is owned by node1
+	err = p.AllocateToNode(node3)
+	assert.EqualError(t, err, "unable to reuse from pool default: cidr 10.100.10.0/24 has already been allocated")
+	assert.Empty(t, p.AllocatedPools(node3.Name))
+
+	// Release 10.100.10.0/24 from node1
+	node1.Spec.IPAM.Pools.Allocated = []ipamTypes.IPAMPoolAllocation{
 		{
-			name: "cannot occupy already allocated CIDR",
-			fields: fields{
-				pools: map[string]cidrPool{
-					"default": {
-						v4: newAllocatorsWithOccupied(24, []string{"192.168.0.0/16"}, []string{"192.168.1.0/24"}),
-					},
-				},
-				nodes: map[string]poolToCIDRs{},
-				ready: true,
+			Pool: "default",
+			CIDRs: []string{
+				"10.100.20.0/24",
+				"fd00:100::10:0:0/96",
 			},
-			args: &v2.CiliumNode{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-node",
-				},
-				Spec: v2.NodeSpec{
-					IPAM: ipamTypes.IPAMSpec{
-						Pools: ipamTypes.IPAMPoolSpec{
-							Allocated: []ipamTypes.IPAMPoolAllocation{
-								{
-									Pool:  "default",
-									CIDRs: []string{"192.168.1.0/24"},
-								},
-							},
-							Requested: []ipamTypes.IPAMPoolRequest{
-								{
-									Pool: "default",
-									Needed: ipamTypes.IPAMPoolDemand{
-										IPv4Addrs: 10,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			want: &v2.CiliumNode{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-node",
-				},
-				Spec: v2.NodeSpec{
-					IPAM: ipamTypes.IPAMSpec{
-						Pools: ipamTypes.IPAMPoolSpec{
-							Allocated: []ipamTypes.IPAMPoolAllocation{
-								{
-									Pool:  "default",
-									CIDRs: []string{"192.168.0.0/24"}, // TODO why does allocate a different cidr for it?
-								},
-							},
-							Requested: []ipamTypes.IPAMPoolRequest{
-								{
-									Pool: "default",
-									Needed: ipamTypes.IPAMPoolDemand{
-										IPv4Addrs: 10,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			wantErr: "cidr 192.168.1.0/24 has already been allocated",
 		},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			p := &PoolAllocator{
-				pools: tt.fields.pools,
-				nodes: tt.fields.nodes,
-				ready: tt.fields.ready,
-			}
-			if err := p.AllocateToNode(tt.args); err != nil && (tt.wantErr == "" || !strings.Contains(err.Error(), tt.wantErr)) {
-				t.Errorf("AllocateToNode() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if tt.want != nil {
-				p.PopulateNodeSpec(tt.args)
-				if diff := cmp.Diff(tt.args, tt.want); diff != "" {
-					t.Errorf("AllocateToNode() diff = %s", diff)
-				}
-			}
-		})
-	}
+	err = p.AllocateToNode(node1)
+	assert.NoError(t, err)
+	assert.Equal(t, node1.Spec.IPAM.Pools.Allocated, p.AllocatedPools(node1.Name))
+
+	// node3 can now allocate 10.100.10.0/24
+	err = p.AllocateToNode(node3)
+	assert.NoError(t, err)
+	node1.Spec.IPAM.Pools.Allocated = p.AllocatedPools(node3.Name)
+	assert.Equal(t, []ipamTypes.IPAMPoolAllocation{
+		{
+			Pool: "default",
+			CIDRs: []string{
+				"10.100.10.0/24",
+			},
+		},
+	}, node3.Spec.IPAM.Pools.Allocated)
+
 }
 
 func Test_addrsInPrefix(t *testing.T) {
