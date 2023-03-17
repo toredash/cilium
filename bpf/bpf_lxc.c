@@ -35,6 +35,7 @@
 #include "lib/lxc.h"
 #include "lib/identity.h"
 #include "lib/policy.h"
+#include "lib/clustermesh.h"
 
 /* Override LB_SELECTION initially defined in node_config.h to force bpf_lxc to use the random backend selection
  * algorithm for in-cluster traffic. Otherwise, it will fail with the Maglev hash algorithm because Cilium doesn't provision
@@ -1120,10 +1121,24 @@ skip_vtep:
 #ifdef TUNNEL_MODE
 	{
 		struct tunnel_key key = {};
+		__u8 cluster_id_from_ct __maybe_unused = 0;
 
 		key.ip4 = ip4->daddr & IPV4_MASK;
 		key.family = ENDPOINT_KEY_IPV4;
 		key.cluster_id = cluster_id;
+
+#ifdef ENABLE_CLUSTER_AWARE_ADDRESSING
+		/*
+		 * The destination is remote node, but the connection is originated from tunnel.
+		 * Maybe the remote cluster performed SNAT for the inter-cluster communication
+		 * and this is the reply for that. In that case, we need to send it back to tunnel.
+		 */
+		if (ct_status == CT_REPLY) {
+			cluster_id_from_ct = extract_cluster_id_from_identity(ct_state->src_sec_id);
+			if (identity_is_remote_node(*dst_id) && ct_state->from_tunnel)
+				tunnel_endpoint = ip4->daddr;
+		}
+#endif
 
 		ret = encap_and_redirect_lxc(ctx, tunnel_endpoint, encrypt_key,
 					     &key, node_id, SECLABEL, *dst_id,
