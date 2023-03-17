@@ -1531,7 +1531,8 @@ static __always_inline int lb4_local(const void *map, struct __ctx_buff *ctx,
 				     const struct lb4_service *svc,
 				     struct ct_state *state,
 				     bool has_l4_header,
-				     const bool skip_l3_xlate)
+				     const bool skip_l3_xlate,
+				     __u8 *cluster_id __maybe_unused)
 {
 	__u32 monitor; /* Deliberately ignored; regular CT will determine monitoring. */
 	__be32 saddr = tuple->saddr;
@@ -1646,6 +1647,10 @@ static __always_inline int lb4_local(const void *map, struct __ctx_buff *ctx,
 		ct_update_backend_id(map, tuple, state);
 	}
 update_state:
+#ifdef ENABLE_CLUSTER_AWARE_ADDRESSING
+	*cluster_id = backend->cluster_id;
+#endif
+
 	/* Restore flags so that SERVICE flag is only used in used when the
 	 * service lookup happens and future lookups use EGRESS or INGRESS.
 	 */
@@ -1700,12 +1705,13 @@ drop_no_service:
  */
 static __always_inline void lb4_ctx_store_state(struct __ctx_buff *ctx,
 						const struct ct_state *state,
-					       __u16 proxy_port)
+					       __u16 proxy_port, __u8 cluster_id)
 {
 	ctx_store_meta(ctx, CB_PROXY_MAGIC, (__u32)proxy_port << 16);
 	ctx_store_meta(ctx, CB_BACKEND_ID, state->backend_id);
 	ctx_store_meta(ctx, CB_CT_STATE, (__u32)state->rev_nat_index << 16 |
 		       state->loopback);
+	ctx_store_meta(ctx, CB_CLUSTER_ID_EGRESS, (__u32)cluster_id << 24);
 }
 
 /* lb4_ctx_restore_state() restores per packet load balancing state from the
@@ -1715,7 +1721,7 @@ static __always_inline void lb4_ctx_store_state(struct __ctx_buff *ctx,
  */
 static __always_inline void
 lb4_ctx_restore_state(struct __ctx_buff *ctx, struct ct_state *state,
-		      __u32 daddr __maybe_unused, __u16 *proxy_port)
+		      __u32 daddr __maybe_unused, __u16 *proxy_port, __u8 *cluster_id)
 {
 	__u32 meta = ctx_load_meta(ctx, CB_CT_STATE);
 #ifndef DISABLE_LOOPBACK_LB
@@ -1736,6 +1742,9 @@ lb4_ctx_restore_state(struct __ctx_buff *ctx, struct ct_state *state,
 
 	*proxy_port = ctx_load_meta(ctx, CB_PROXY_MAGIC) >> 16;
 	ctx_store_meta(ctx, CB_PROXY_MAGIC, 0);
+
+	*cluster_id = ctx_load_meta(ctx, CB_CLUSTER_ID_EGRESS) >> 24;
+	ctx_store_meta(ctx, CB_CLUSTER_ID_EGRESS, 0);
 }
 
 #endif /* ENABLE_IPV4 */
