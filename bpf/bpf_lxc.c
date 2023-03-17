@@ -819,7 +819,7 @@ static __always_inline int handle_ipv4_from_lxc(struct __ctx_buff *ctx, __u32 *d
 	if (1) {
 		struct remote_endpoint_info *info;
 
-		info = lookup_ip4_remote_endpoint(ip4->daddr, 0);
+		info = lookup_ip4_remote_endpoint(ip4->daddr, cluster_id);
 		if (info && info->sec_label) {
 			*dst_id = info->sec_label;
 			tunnel_endpoint = info->tunnel_endpoint;
@@ -1122,6 +1122,7 @@ skip_vtep:
 
 		key.ip4 = ip4->daddr & IPV4_MASK;
 		key.family = ENDPOINT_KEY_IPV4;
+		key.cluster_id = cluster_id;
 
 		ret = encap_and_redirect_lxc(ctx, tunnel_endpoint, encrypt_key,
 					     &key, node_id, SECLABEL, *dst_id,
