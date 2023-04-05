@@ -114,7 +114,16 @@ xdp_store_bytes(const struct xdp_md *ctx, __u64 off, const void *from,
 static __always_inline void *							\
 __ctx_ptr_ ## FIELD(const struct xdp_md *ctx)					\
 {										\
-	return (void *)(unsigned long)ctx->FIELD;				\
+	void *ptr;								\
+										\
+	/* LLVM may generate u32 assignments of ctx->{data,data_end,data_meta}.	\
+	 * With this inline asm, LLVM loses track of the fact this field is on	\
+	 * 32 bits.								\
+	 */									\
+	asm volatile("%0 = *(u32 *)(%1 + %2)"					\
+		     : "=r"(ptr)						\
+		     : "r"(ctx), "i"(offsetof(struct __sk_buff, FIELD)));	\
+	return ptr;								\
 }
 /* This defines __ctx_prt_data(). */
 DEFINE_FUNC_CTX_POINTER(data)
