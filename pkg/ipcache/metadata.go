@@ -109,6 +109,7 @@ func (m *metadata) enqueuePrefixUpdates(prefixes ...netip.Prefix) {
 }
 
 func (m *metadata) upsertLocked(prefix netip.Prefix, src source.Source, resource types.ResourceID, info ...IPMetadata) {
+	log.Infof("chris debug: upsertLocked(%v, %v, %v, %v)", prefix, src, resource, info)
 	if _, ok := m.m[prefix]; !ok {
 		m.m[prefix] = make(PrefixInfo)
 	}
