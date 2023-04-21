@@ -20,7 +20,7 @@ import (
 type flowsToWorldHandler struct {
 	flowsToWorld *prometheus.CounterVec
 	context      *api.ContextOptions
-	worldLabel   string
+	worldLabels  map[string]struct{}
 	anyDrop      bool
 	port         bool
 	synOnly      bool
@@ -53,7 +53,10 @@ func (h *flowsToWorldHandler) Init(registry *prometheus.Registry, options api.Op
 		Name:      "flows_to_world_total",
 		Help:      "Total number of flows to reserved:world",
 	}, labels)
-	h.worldLabel = fmt.Sprintf("%s:%s", pkglabels.LabelSourceReserved, pkglabels.IDNameWorld)
+	h.worldLabels = make(map[string]struct{})
+	h.worldLabels[fmt.Sprintf("%s:%s", pkglabels.LabelSourceReserved, pkglabels.IDNameWorld)] = struct{}{}
+	h.worldLabels[fmt.Sprintf("%s:%s", pkglabels.LabelSourceReserved, pkglabels.IDNameWorldIPv4)] = struct{}{}
+	h.worldLabels[fmt.Sprintf("%s:%s", pkglabels.LabelSourceReserved, pkglabels.IDNameWorldIPv6)] = struct{}{}
 	registry.MustRegister(h.flowsToWorld)
 	return nil
 }
@@ -82,7 +85,7 @@ func (h *flowsToWorldHandler) ListMetricVec() []*prometheus.MetricVec {
 
 func (h *flowsToWorldHandler) isReservedWorld(endpoint *flowpb.Endpoint) bool {
 	for _, label := range endpoint.Labels {
-		if label == h.worldLabel {
+		if _, ok := h.worldLabels[label]; ok {
 			return true
 		}
 	}

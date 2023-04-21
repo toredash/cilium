@@ -26,6 +26,14 @@ const (
 	// IDNameWorld is the label used for the world ID.
 	IDNameWorld = "world"
 
+	// IDNameWorldIPv4 is the label used for the world-ipv4 ID, to distinguish
+	// it from world-ipv6 in dual-stack mode.
+	IDNameWorldIPv4 = "world-ipv4"
+
+	// IDNameWorldIPv6 is the label used for the world-ipv6 ID, to distinguish
+	// it from world-ipv4 in dual-stack mode.
+	IDNameWorldIPv6 = "world-ipv6"
+
 	// IDNameCluster is the label used to identify an unspecified endpoint
 	// inside the cluster
 	IDNameCluster = "cluster"
@@ -68,6 +76,12 @@ var (
 
 	// LabelWorld is the label used for world.
 	LabelWorld = Labels{IDNameWorld: NewLabel(IDNameWorld, "", LabelSourceReserved)}
+
+	// LabelWorldIPv4 is the label used for world-ipv4.
+	LabelWorldIPv4 = Labels{IDNameWorldIPv4: NewLabel(IDNameWorldIPv4, "", LabelSourceReserved)}
+
+	// LabelWorldIPv6 is the label used for world-ipv6.
+	LabelWorldIPv6 = Labels{IDNameWorldIPv6: NewLabel(IDNameWorldIPv6, "", LabelSourceReserved)}
 
 	// LabelRemoteNode is the label used for remote nodes.
 	LabelRemoteNode = Labels{IDNameRemoteNode: NewLabel(IDNameRemoteNode, "", LabelSourceReserved)}
@@ -542,10 +556,12 @@ func (l Labels) IsReserved() bool {
 }
 
 // Has returns true if l contains the given label.
-func (l Labels) Has(label Label) bool {
-	for _, lbl := range l {
-		if lbl.matches(&label) {
-			return true
+func (l Labels) Has(args ...Label) bool {
+	for _, label := range args {
+		for _, lbl := range l {
+			if lbl.matches(&label) {
+				return true
+			}
 		}
 	}
 	return false
